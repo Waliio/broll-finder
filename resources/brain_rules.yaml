@@ -1,0 +1,245 @@
+# =============================================================================
+#  B-ROLL FINDER — OFFLINE BRAIN  (koi API key nahi chahiye)
+# =============================================================================
+#  Yeh file tool ka dimaagh hai. Is mein AI nahi, balki RULES hain:
+#   - script mein se moments, naam, saal aur events kaise pehchanne hain
+#   - YouTube par kya search karna hai
+#   - transcript mein kaunse alfaaz scandal, controversy, interview, news,
+#     emotional moment, waghera ki nishani hain, aur un ke kitne points hain
+#
+#  Kaise behtar karein:
+#   - Koi achhi clip miss ho rahi ho: us mein bola gaya khaas jumla
+#     neeche us category ki "phrases" list mein add kar dein.
+#   - Ghalat clips aa rahi hon: un ka jumla "penalties" mein daal dein.
+#   - Points (weight) barha kar kisi cheez ki ahmiyat barha sakte hain.
+#
+#  Lines jo "#" se shuru hoti hain, woh sirf notes hain.
+#  Spaces (indentation) ka khayal rakhein, YAML file mein yeh zaroori hain.
+# =============================================================================
+
+version: 1
+
+# -----------------------------------------------------------------------------
+# PART A — SCRIPT SAMAJHNA
+# -----------------------------------------------------------------------------
+script:
+  # Ek moment kitne jumlon ka ho sakta hai
+  max_sentences_per_moment: 2
+  # Script ke shuru ke jumle jo skip karne hain (salaam, intro, CTA)
+  skip_sentence_patterns:
+    - "^(hi|hey|hello|welcome)\\b"
+    - "\\b(subscribe|like this video|hit the bell|comment below|let'?s get (into|started))\\b"
+    - "\\bin (this|today'?s) video\\b"
+    - "\\bthanks for watching\\b"
+    - "^(have|did|do|would|could|will|are|were) you\\b"
+    - "\\b(what about you|let me know)\\b"
+
+  # Bare harfon wale yeh alfaaz naam nahi hote (jumle ke shuru mein aate hain)
+  not_names:
+    [The, A, An, In, On, At, But, And, Or, So, Then, When, After, Before, Years,
+     Later, Instead, This, That, These, Those, It, He, She, They, We, I, You,
+     His, Her, Their, Our, My, Your, Its, What, Why, How, Who, Where, Meanwhile,
+     However, Today, Now, Still, Even, Just, Only, Also, Because, Since, While,
+     During, Despite, Although, If, As, From, For, With, By, Of, To, One, Two,
+     January, February, March, April, May, June, July, August, September,
+     October, November, December, Monday, Tuesday, Wednesday, Thursday, Friday,
+     Saturday, Sunday, Like, Between, Read, Have, Has, Had, Did, Do, Does,
+     Never, Every, Each, Many, Most, Some, All, Here, There, Back, Not, No, Yes,
+     Let, Know, Keep, Think, Imagine, Remember, Picture, Look, Today's, Nobody,
+     Everyone, Someone, Something, Nothing, Almost, Finally, First, Last, Next]
+
+  # Event ke alfaaz: jis jumle mein yeh hon, us ko B-roll chahiye.
+  # ORDER ZAROORI HAI: upar wale groups ko pehle tarjeeh milti hai.
+  # "generic: true" wale groups (aam alfaaz) sirf tab use hote hain jab
+  # koi khaas event na mile, aur un ke alfaaz clip match mein nahi gine jate.
+  # Har group ke saath "show" likha hai ke kaisi footage chahiye,
+  # aur "query_words" jo YouTube search mein judte hain.
+  events:
+    award_show:
+      words: [vma, vmas, grammy, grammys, oscar, oscars, emmy, emmys, award, awards,
+              ceremony, red carpet, golden globes, bet awards, ama, amas, brit awards, met gala]
+      show: "live broadcast of the moment at the ceremony"
+      query_words: [live, stage]
+    legal:
+      words: [lawsuit, sued, sue, court, trial, judge, verdict, arrested, arrest, charged, charges,
+              police, jail, prison, settlement, testimony, testified, allegations, accused, investigation]
+      show: "news coverage, court footage or official statement"
+      query_words: [news, court]
+    scandal:
+      words: [scandal, leaked, leak, exposed, controversy, backlash, cancelled, canceled, apology,
+              apologized, apologise, accused, secret, hidden, cover-up, fraud]
+      show: "the exposed moment, news coverage and any apology"
+      query_words: [news, apology]
+    feud:
+      words: [feud, fight, beef, rivalry, clash, diss, called out, attacked, slammed, insulted,
+              interrupted, stormed, grabbed, drama, war]
+      show: "the confrontation itself and news coverage of it"
+      query_words: [moment, news]
+    relationship:
+      words: [dating, married, marriage, divorce, divorced, breakup, broke up, engaged, engagement,
+              split, relationship, boyfriend, girlfriend, wife, husband, wedding, cheating]
+      show: "public appearances together or interview about the relationship"
+      query_words: [interview, news]
+    business:
+      words: [masters, master recordings, bought back, bought, sold, record deal, deal, contract, rights, label, company, ownership, signed,
+              billion, million, sale, acquired, fired, quit, resigned]
+      show: "news report or interview explaining the deal"
+      query_words: [news, explained]
+    performance:
+      words: [concert, tour, performance, performed, stage, show, halftime, super bowl, festival, coachella]
+      show: "concert or stage footage"
+      query_words: [live, performance]
+    music_release:
+      words: [album, albums, song, songs, single, re-record, re-recorded, re-recording, recorded again, music video, released, release, studio]
+      show: "official music video, release coverage or interview about the album"
+      query_words: [interview, announcement]
+    career_moment:
+      generic: true
+      words: [won, win, record, history, first, biggest, comeback, retire, retired, debut, broke,
+              success, viral, famous, fame, number one]
+      show: "the milestone moment and reactions"
+      query_words: [moment, history]
+    speech:
+      generic: true
+      words: [said, speech, statement, announced, announcement, revealed, admitted, confessed,
+              told, responded, response, interview, press conference, podcast]
+      show: "the person speaking, from the original source"
+      query_words: [interview, full]
+
+  # YouTube search kaise banayein. {main} = script ka main insaan,
+  # {names} = is moment ke naam, {year} = saal, {event} = event ka lafz,
+  # {extra} = upar wale group ke query_words.
+  query_templates:
+    - "{main} {names} {event} {year} {extra}"
+    - "{main} {event} {year} interview"
+    - "{main} {names} {event} news"
+  max_query_words: 9
+  queries_per_moment: 2   # kam searches = YouTube block ka khatra kam
+
+# -----------------------------------------------------------------------------
+# PART B — TRANSCRIPT MEIN BEST CLIPS DHOONDNA
+# -----------------------------------------------------------------------------
+clips:
+  window_seconds: 30        # ek waqt mein transcript ka kitna hissa jaancha jaye
+  step_seconds: 10          # window kitna aage khiske
+  min_length: 8             # clip kam az kam kitne second ki ho
+  max_length: 40            # clip zyada se zyada kitne second ki ho
+  pre_roll: 2               # clip ahem lafz se kitna pehle shuru ho
+  min_gap_between_clips: 20 # ek hi video ki do clips mein kam az kam faasla
+  min_relevance: 3          # is se kam relevance wali clip reject (1-10)
+  require_name_or_year: true # clip mein script ka koi naam ya saal hona zaroori
+
+  # Relevance points: script ke alfaaz transcript mein milne par
+  relevance_points:
+    name: 3          # script ka naam (jaise Kanye West)
+    main_subject: 2  # script ka main insaan (jaise Taylor Swift)
+    year: 2          # saal (jaise 2009)
+    event_word: 2    # event ka lafz (jaise VMA, lawsuit)
+    other_keyword: 1 # baqi ahem alfaaz
+    title_match: 1   # video ke title mein moment ke alfaaz hon to har window ko bonus
+  relevance_per_point: 1.2   # har point se 1-10 score kitna barhe
+
+  interest_per_point: 1.0
+
+  # Categories: har category ke jumle aur un ke points.
+  # Jitne zyada points, utni dilchasp clip. Sab se zyada points wali
+  # category clip ki category banti hai.
+  categories:
+    Scandal:
+      weight: 3
+      phrases: [scandal, leaked, leak, exposed, allegations, accused, lawsuit, sued, arrested,
+                investigation, cover up, fraud, secret, caught, admitted, confessed, cheating,
+                court, charges, police, under fire, backlash]
+    Controversy:
+      weight: 3
+      phrases: [controversy, controversial, feud, beef, fight, attacked, slammed, criticized,
+                criticised, called out, outrage, booed, booing, interrupted, disrespect,
+                disrespectful, rude, angry, furious, shade, diss, war, drama, clash, insult,
+                "how dare", unacceptable, "not okay"]
+    Key Statement:
+      weight: 2
+      phrases: ["the truth is", "i want to be clear", "let me be clear", "i never", "i always",
+                "i decided", "i wanted", "i felt", "i was", "to be honest", honestly,
+                "the reason", "i realized", "i learned", "for the first time", "i'm going to",
+                "i will", "i won't", "my side", "what happened was", "i'm sorry", "i apologize"]
+    Emotional Moment:
+      weight: 2
+      phrases: ["[crying]", crying, cried, tears, heartbroken, devastated, "broke my heart",
+                emotional, "i'm sorry", shocked, scared, hurt, painful, "so hard", "[laughter]",
+                laughing, "oh my god", "i can't believe", unbelievable]
+    News Report:
+      weight: 2
+      phrases: ["breaking news", "breaking", "we've learned", "we have learned", "sources say",
+                "according to", "reports", "reported", "tonight", "this morning", "just in",
+                "officials", "statement", "confirmed", "the network", "correspondent",
+                "joining us", "live from", "developing story"]
+    Interview:
+      weight: 1.5
+      phrases: ["what was it like", "how did you feel", "how do you feel", "tell us", "tell me about",
+                "can you talk about", "what happened", "why did you", "do you think",
+                "when did you", "thank you for being here", "welcome to the show",
+                "great to have you", "sit down with"]
+    Reaction:
+      weight: 1.5
+      phrases: ["[applause]", applause, "[cheering]", cheering, "[booing]", "the crowd",
+                "the audience", gasps, "everyone was", "people were", reacted, reaction]
+    Performance:
+      weight: 1
+      phrases: ["[music]", "[singing]", performing, performance, "on stage", concert, tour,
+                "sing", "song"]
+
+  # Minus points: aisi jagahen jahan clip nahi chahiye
+  penalties:
+    phrases:
+      - { phrase: "subscribe", points: 4 }
+      - { phrase: "hit the bell", points: 4 }
+      - { phrase: "like and subscribe", points: 5 }
+      - { phrase: "sponsored by", points: 6 }
+      - { phrase: "this video is sponsored", points: 6 }
+      - { phrase: "use code", points: 5 }
+      - { phrase: "link in the description", points: 4 }
+      - { phrase: "patreon", points: 4 }
+      - { phrase: "welcome back to my channel", points: 4 }
+      - { phrase: "in today's video", points: 3 }
+      - { phrase: "thanks for watching", points: 4 }
+      - { phrase: "comment below", points: 3 }
+    intro_seconds: 15    # video ke pehle itne second
+    intro_penalty: 2
+    outro_seconds: 30    # video ke aakhri itne second
+    outro_penalty: 2
+
+# -----------------------------------------------------------------------------
+# VIDEO SOURCE — kaunsi video behtar hai
+# -----------------------------------------------------------------------------
+sources:
+  # In channels ki footage asal aur bharose wali hoti hai (interest +)
+  trusted_channels:
+    bonus: 1.5
+    names: [cnn, bbc, nbc, cbs, abc, fox, sky news, reuters, associated press, ap archive,
+            al jazeera, msnbc, cbc, guardian, nytimes, washington post, wsj,
+            mtv, e! news, entertainment tonight, access hollywood, extra, tmz, people,
+            billboard, rolling stone, vanity fair, vogue, gq, variety,
+            theellenshow, ellen, the tonight show, jimmy kimmel, late show, graham norton,
+            the view, good morning america, today, 60 minutes, howard stern, oprah,
+            vevo, " - topic", official]
+  # Title mein yeh alfaaz hon to video achhi hai
+  good_title_words:
+    bonus: 1
+    words: [official, full, live, interview, speech, footage, original, exclusive, uncut,
+            press conference, statement, news]
+  # Title mein yeh alfaaz hon to aksar commentary/fan video hoti hai
+  bad_title_words:
+    penalty: 2
+    words: [reaction, reacts, "top 10", "top 5", ranking, explained, compilation, edit,
+            fan made, fanmade, theory, theories, "ai ", parody, tiktok, shorts, meme, "#shorts"]
+
+# -----------------------------------------------------------------------------
+# MERI PASAND — apni channel ke hisaab se
+# -----------------------------------------------------------------------------
+preferences:
+  # In alfaaz wali clips ko extra points (apni pasand ke alfaaz daalein)
+  boost_phrases: []
+  # Yeh channels hamesha skip karein
+  blocked_channels: []
+  # Is se lambi videos skip (minutes)
+  max_video_minutes: 90

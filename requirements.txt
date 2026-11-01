@@ -1,0 +1,15 @@
+# B-Roll Finder — pinned for a reproducible Windows build (Python 3.12).
+# The user never installs these: PyInstaller bundles them into the app.
+pywebview==5.1
+yt-dlp>=2024.8.6
+youtube-transcript-api>=1.0
+faster-whisper>=1.0.0
+openpyxl>=3.1.2
+python-docx>=1.1.0
+PyYAML>=6.0.1
+platformdirs>=4.2.0
+google-genai>=0.3.0
+anthropic>=0.40
+requests>=2.31.0
+# Test-only (used by CI, not bundled):
+pytest>=8.0.0
