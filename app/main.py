@@ -13,7 +13,12 @@ import sys
 import threading
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# In the installed (PyInstaller) app, bundled data lives in sys._MEIPASS
+# (the _internal folder); in source mode, the project root is app/'s parent.
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    ROOT = Path(sys._MEIPASS)
+else:
+    ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from engine import __version__ as APP_VERSION  # noqa: E402
