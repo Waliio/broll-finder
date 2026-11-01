@@ -6,6 +6,8 @@
 # PyInstaller builds for the machine it runs on.
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
 from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
@@ -30,9 +32,14 @@ for pkg in ('ctranslate2', 'av', 'tokenizers', 'onnxruntime'):
     except Exception:
         pass
 
+# CRITICAL: the entry script is app/main.py, but the engine package lives
+# at the project root. With pathex=[] PyInstaller only searches app/ and
+# silently leaves engine out of the bundle, so the installed app crashes
+# with "No module named 'engine'". The workflow runs this from the repo
+# root, so '.' is the project root here.
 a = Analysis(
     ['app/main.py'],
-    pathex=[],
+    pathex=[os.path.abspath('.')],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
