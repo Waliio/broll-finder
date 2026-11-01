@@ -63,13 +63,19 @@ def documents_dir() -> Path:
 
 
 def resource_path(name: str) -> Path:
-    """Bundled file: next to the frozen app, else next to this package."""
+    """Bundled file: in the frozen app (sys._MEIPASS) first, else next to
+    this package (source mode)."""
+    import sys
     here = Path(__file__).resolve()
-    for cand in (here.parent.parent / "resources" / name,
-                 Path.cwd() / "resources" / name):
+    candidates = []
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        candidates.append(Path(sys._MEIPASS) / "resources" / name)
+    candidates += [here.parent.parent / "resources" / name,
+                   Path.cwd() / "resources" / name]
+    for cand in candidates:
         if cand.exists():
             return cand
-    return here.parent.parent / "resources" / name
+    return candidates[0]
 
 
 def ensure_user_files(data_dir: Path | None = None) -> Path:
