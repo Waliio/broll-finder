@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.offline_brain import load_brain, pick_clips, plan_moments
 from engine.pipeline import Pipeline
-from engine.settings import DEFAULTS, load_settings, save_settings
+from engine.settings import DEFAULTS, bundled_brain_text, ensure_user_files, load_settings, save_settings
 from engine.transcript_fallback import TranscriptFetcher, parse_vtt
 from engine.utils import fmt_time, parse_time, score_clip
 
@@ -144,6 +144,27 @@ class TestPipelineWithFakes(unittest.TestCase):
             self.assertTrue(any(e["type"] == "done" for e in events))
             # Resume file exists, so a stopped run can continue.
             self.assertTrue((out / "resume.json").exists())
+
+    def test_empty_brain_file_is_repaired(self):
+        # Regression: an empty BRAIN tab blocked every scan. An empty
+        # brain file must be rewritten from the bundled/embedded default.
+        import yaml
+        from engine.offline_brain import validate_brain
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "brain_rules.yaml"
+            p.write_text("", encoding="utf-8")
+            ensure_user_files(Path(tmp))
+            validate_brain(yaml.safe_load(p.read_text(encoding="utf-8")))
+
+    def test_embedded_brain_fallback_when_resource_missing(self):
+        import engine.settings as settings_mod
+        orig = settings_mod.resource_path
+        settings_mod.resource_path = lambda name: Path("/definitely/not/here") / name
+        try:
+            text = bundled_brain_text("brain_rules.yaml")
+            self.assertTrue(text and "clips:" in text)
+        finally:
+            settings_mod.resource_path = orig
 
     def test_settings_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
