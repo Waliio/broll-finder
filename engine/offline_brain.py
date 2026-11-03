@@ -1,14 +1,8 @@
-"""
-Offline Brain for B-Roll Finder — works with NO API key and NO internet AI.
+"""Offline Brain: rule-based planning and clip scoring, no API key.
 
-It replaces the two AI steps of the pipeline with rules from brain_rules.yaml:
-
-    plan_moments(script_text, brain)            -> same shape as the AI planner
-    pick_clips(topic, video, lines, brain, n)   -> same shape as the AI clip picker
-
-`lines` is the transcript as a list of {"start": seconds, "text": str}.
-Returned clips use the same keys the rest of the app already expects:
-start, end, category, what_happens, key_quote, why_it_fits, relevance, interest.
+Rules come from the brain YAML (see engine/default_brain.py for the
+embedded copy). plan_moments() turns script sentences into moments;
+pick_clips() scores transcript windows against a moment.
 """
 
 from __future__ import annotations
@@ -21,32 +15,35 @@ from pathlib import Path
 import yaml
 
 
-# --------------------------------------------------------------------------- brain
 def load_brain(path: str | Path) -> dict:
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     validate_brain(data)
     return data
 
 
+def load_brain_from_text(text: str) -> dict:
+    data = yaml.safe_load(text)
+    validate_brain(data)
+    return data
+
+
 def load_brain_for_run(data_dir: str | Path) -> dict:
     """Brain for a scan. Public builds use the embedded brain only, so
-    no readable brain file ever has to exist on the user's PC. Private
-    builds use the user's (editable) brain file, as before."""
+    no readable brain file ever has to exist on the user's PC."""
     try:
         from engine.settings import is_public_build
+
         public = is_public_build()
     except Exception:
         public = False
     if public:
         from engine.default_brain import DEFAULT_BRAIN_YAML
-        data = yaml.safe_load(DEFAULT_BRAIN_YAML)
-        validate_brain(data)
-        return data
+
+        return load_brain_from_text(DEFAULT_BRAIN_YAML)
     return load_brain(Path(data_dir) / "brain_rules.yaml")
 
 
 def validate_brain(b: dict) -> None:
-    """Raise ValueError with a plain message if the brain file is broken."""
     if not isinstance(b, dict):
         raise ValueError("The brain file is empty or not valid YAML.")
     for key in ("script", "clips", "sources"):
@@ -58,7 +55,6 @@ def validate_brain(b: dict) -> None:
         raise ValueError("The brain file has no script events.")
 
 
-# --------------------------------------------------------------------------- text helpers
 @lru_cache(maxsize=4096)
 def _phrase_re(phrase: str) -> re.Pattern:
     p = phrase.lower().strip()
@@ -68,359 +64,226 @@ def _phrase_re(phrase: str) -> re.Pattern:
     return re.compile(left + body + right)
 
 
-def count_phrase(text_lower: str, phrase: str) -> int:
+def _count(text_lower: str, phrase: str) -> int:
     return len(_phrase_re(str(phrase)).findall(text_lower))
 
 
-def has_phrase(text_lower: str, phrase: str) -> bool:
+def _has(text_lower: str, phrase: str) -> bool:
     return _phrase_re(str(phrase)).search(text_lower) is not None
 
 
-def split_sentences(text: str) -> list[str]:
-    text = re.sub(r"\s+", " ", text).strip()
-    parts = re.split(r"(?<=[.!?])\s+(?=[\"“'A-Z0-9])", text)
-    return [p.strip() for p in parts if len(p.strip()) > 3]
+def _sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    return [p.strip() for p in parts if p.strip()]
 
 
-NAME_RE = re.compile(r"\b([A-Z][\w'’\-]*[a-zà-ÿ\w](?:\s+(?:[A-Z][\w'’\-]+|of|the|de|van|von|al|bin))*)")
-YEAR_RE = re.compile(r"\b(19[5-9]\d|20[0-4]\d)\b")
-QUOTE_RE = re.compile(r"[\"“]([^\"”]{2,60})[\"”]")
-
-
-def mid_sentence_caps(sentences: list[str]) -> set[str]:
-    """Words that appear capitalised somewhere other than the start of a sentence."""
-    caps = set()
-    for s in sentences:
-        toks = re.findall(r"[\w'’\-]+", s)
-        for w in toks[1:]:
-            if w[:1].isupper():
-                caps.add(re.sub(r"['’]s$", "", w))
-    return caps
-
-
-def extract_names(sentence: str, not_names: set[str], mid_caps: set[str] | None = None) -> list[str]:
-    names = []
-    lead = len(sentence) - len(sentence.lstrip(" \"“'"))
-    for m in NAME_RE.finditer(sentence):
-        words = m.group(1).split()
-        # a single capitalised word that only starts the sentence is usually not a name
-        if mid_caps is not None and m.start() <= lead and len(words) == 1 \
-                and re.sub(r"['’]s$", "", words[0]) not in mid_caps:
+def _full_names(text: str, not_names: set[str]) -> list[str]:
+    found = []
+    for m in re.finditer(r"\b([A-Z][a-z]+(?: [A-Z][a-z]+)+)\b", text):
+        name = m.group(1)
+        words = name.split()
+        if any(w in not_names for w in words):
             continue
-        while words and (words[0] in not_names or words[0].lower() in {"of", "the"}):
-            words = words[1:]
-        while words and words[-1].lower() in {"of", "the", "de", "van", "von", "al", "bin"}:
-            words = words[:-1]
-        if not words:
-            continue
-        name = " ".join(words).rstrip("'’s").strip()
-        name = re.sub(r"['’]s$", "", name)
-        if len(name) < 2 or name.isdigit():
-            continue
-        names.append(name)
-    for q in QUOTE_RE.findall(sentence):
-        names.append(q.strip())
-    out, seen = [], set()
-    for n in names:
-        if n.lower() not in seen:
-            seen.add(n.lower())
-            out.append(n)
-    return out
+        if name not in found:
+            found.append(name)
+    return found
 
 
-def find_events(sentence_lower: str, events: dict) -> list[tuple[str, str]]:
-    """Return [(event_group, matched_word)] by priority: the order of groups in the
-    brain file, with groups marked generic: true always after specific ones."""
-    specific, generic = [], []
-    for group, spec in events.items():
-        for w in spec.get("words", []):
-            if _phrase_re(str(w)).search(sentence_lower):
-                (generic if spec.get("generic") else specific).append((group, str(w)))
-                break
-    return specific + generic
-
-
-def _clean_query(words: list[str], max_words: int) -> str:
-    out, seen = [], set()
-    for chunk in words:
-        for w in str(chunk).split():
-            k = w.lower()
-            if k and k not in seen:
-                seen.add(k)
-                out.append(w)
-    return " ".join(out[:max_words])
-
-
-# --------------------------------------------------------------------------- PART A
 def plan_moments(script_text: str, brain: dict, max_topics: int = 15) -> dict:
-    sb = brain["script"]
-    not_names = set(sb.get("not_names", []))
-    skip_res = [re.compile(p, re.I) for p in sb.get("skip_sentence_patterns", [])]
-    events = sb["events"]
+    """Return {"main_subject": ..., "topics": [...]}.
 
-    sentences = [s for s in split_sentences(script_text) if not any(r.search(s) for r in skip_res)]
-    mid_caps = mid_sentence_caps(sentences)
+    Main subject: the full name whose first name is mentioned most.
+    A moment needs a name or a year plus an event word. Topic label:
+    the winning event group's words (award groups get an "award" suffix,
+    business groups keep their first two words in brain-list order, e.g.
+    "bought rights").
+    """
+    cfg = brain["script"]
+    not_names = set(cfg.get("not_names", []))
+    skip_res = [re.compile(p, re.IGNORECASE) for p in cfg.get("skip_sentence_patterns", [])]
+    events = cfg.get("events", {})
+    sentences = [s for s in _sentences(script_text) if not any(r.search(s) for r in skip_res)]
+    if not sentences:
+        return {"main_subject": "", "topics": []}
 
-    # main subject = most mentioned name across the script
-    counts = Counter()
-    for s in sentences:
-        for n in extract_names(s, not_names, mid_caps):
-            counts[n] += 1
-    # merge "Taylor" into "Taylor Swift" when one is part of the other
-    for short in list(counts):
-        for long in list(counts):
-            if short != long and short in long.split():
-                counts[long] += counts.pop(short, 0)
-                break
+    names = _full_names(script_text, not_names)
+    # Main subject by first-name mention count.
+    counts: Counter = Counter()
+    for name in names:
+        first = name.split()[0]
+        counts[name] = len(re.findall(rf"\b{re.escape(first)}\b", script_text))
     main = counts.most_common(1)[0][0] if counts else ""
 
-    moments, carry_names, carry_year = [], [], ""
-    i = 0
-    max_sent = int(sb.get("max_sentences_per_moment", 2))
-    while i < len(sentences):
-        s = sentences[i]
-        # "Then in May 2025, the story came full circle." -> join with the next sentence
-        if i + 1 < len(sentences) and YEAR_RE.search(s) and not extract_names(s, not_names, mid_caps) \
-                and not [g for g, _ in find_events(s.lower(), events) if not events[g].get("generic")]:
-            sentences[i + 1] = s + " " + sentences[i + 1]
-            i += 1
-            continue
-        low = s.lower()
-        all_ev_words = {str(w).lower() for sp in events.values() for w in sp.get("words", [])}
-        names = [n for n in extract_names(s, not_names, mid_caps)
-                 if not (main and (n in main.split() or n == main))
-                 and not any(part.lower() in all_ev_words for part in n.split())]
-        years = YEAR_RE.findall(s)
-        evs = find_events(low, events)
-        specific_evs = [(g, w) for g, w in evs if not events[g].get("generic")]
-        if not specific_evs and not years and not names:
-            i += 1  # plain narration: nothing specific to show
-            continue
-        group = [s]
-        my_groups = {g for g, _ in evs if not events[g].get("generic")}
-        # pull in following sentences that continue this moment (no new event type, no new year)
-        j = i + 1
-        while len(group) < max_sent and j < len(sentences):
-            nxt = sentences[j]
-            nxt_groups = {g for g, _ in find_events(nxt.lower(), events) if not events[g].get("generic")}
-            nxt_years = set(YEAR_RE.findall(nxt))
-            if (nxt_groups - my_groups) or (nxt_years - set(years)):
-                break
-            group.append(nxt)
-            j += 1
-        if names:
-            carry_names = names[:3] or carry_names
-        if years:
-            carry_year = years[0]
-        moment_names = names[:2] or carry_names[:2]
-        year = years[0] if years else carry_year
-        ev_group, ev_word = evs[0] if evs else ("speech", "")
-        group_low = " ".join(group).lower()
-        spec_words = []
-        for g, sp in events.items():
-            if sp.get("generic"):
-                continue
-            for w in sp.get("words", []):
-                w = str(w)
-                if has_phrase(group_low, w) and not any(w in x or x in w for x in spec_words):
-                    spec_words.append(w)
-        if spec_words:
-            ev_word = " ".join(spec_words[:2])
-        spec = events.get(ev_group, {})
-        extra = " ".join(spec.get("query_words", [])[:2])
-        fill = {"main": main, "names": " ".join(moment_names), "year": year,
-                "event": ev_word, "extra": extra}
-        queries = []
-        for tpl in sb.get("query_templates", []):
-            q = _clean_query([tpl.format(**fill)], int(sb.get("max_query_words", 9)))
-            if q and q.lower() not in [x.lower() for x in queries]:
-                queries.append(q)
-        queries = queries[: int(sb.get("queries_per_moment", 3))]
-        keywords = list(dict.fromkeys(
-            moment_names + ([main] if main else []) + ([year] if year else [])
-            + [w for _, w in specific_evs] + spec_words[:4] + [q for q in QUOTE_RE.findall(s)]))
-        topic_name = " ".join(x for x in [ev_word.title() if ev_word else "", year] if x) or \
-            (moment_names[0] if moment_names else s[:40])
-        if moment_names and ev_word:
-            topic_name = f"{moment_names[0]}: {ev_word} {year}".strip()
-        elif ev_word:
-            topic_name = f"{ev_word.capitalize()} {year}".strip()
-        moments.append({
-            "id": len(moments) + 1,
-            "script_line": " ".join(group),
-            "topic": topic_name,
-            "what_to_show": spec.get("show", "footage of this moment"),
-            "search_queries": queries,
-            "keywords": keywords,
-            "_names": moment_names,
-            "_main": main,
-            "_year": year,
-            "_events": list(dict.fromkeys([w for _, w in specific_evs] + spec_words[:4])),
-        })
-        i = j
-        if len(moments) >= max_topics:
+    topics = []
+    max_sent = int(cfg.get("max_sentences_per_moment", 2))
+    for sent in sentences:
+        if len(topics) >= max_topics:
             break
-    return {"main_subject": main, "topics": moments}
-
-
-# --------------------------------------------------------------------------- PART B
-def _segments(lines: list[dict]) -> list[dict]:
-    segs = []
-    clean = [l for l in lines if str(l.get("text", "")).strip()]
-    for k, l in enumerate(clean):
-        start = float(l["start"])
-        end = float(clean[k + 1]["start"]) if k + 1 < len(clean) else start + 4
-        text = re.sub(r"\s+", " ", str(l["text"]).replace("\n", " ")).strip()
-        segs.append({"start": start, "end": max(end, start + 0.5), "text": text})
-    return segs
-
-
-def video_source_score(video: dict, brain: dict) -> tuple[float, float, list[str]]:
-    """Return (interest_bonus, relevance_penalty, notes) for a whole video."""
-    src = brain.get("sources", {})
-    title = (video.get("title") or "").lower()
-    channel = (video.get("channel") or "").lower()
-    bonus, penalty, notes = 0.0, 0.0, []
-    tc = src.get("trusted_channels", {})
-    if any(n.strip() and n.lower().strip() in channel for n in tc.get("names", [])) or \
-            any(n.lower() == " - topic" and channel.endswith(" - topic") for n in tc.get("names", [])):
-        bonus += float(tc.get("bonus", 0))
-        notes.append("trusted source")
-    gw = src.get("good_title_words", {})
-    if any(has_phrase(title, w) for w in gw.get("words", [])):
-        bonus += float(gw.get("bonus", 0))
-        notes.append("original/full footage")
-    bw = src.get("bad_title_words", {})
-    if any(str(w).lower() in title for w in bw.get("words", [])):
-        penalty += float(bw.get("penalty", 0))
-        notes.append("looks like commentary")
-    return bonus, penalty, notes
+        low = sent.lower()
+        years = re.findall(r"\b(?:19|20)\d{2}\b", sent)
+        sent_names = [n for n in names if n.lower() in low]
+        if not sent_names and not years:
+            continue
+        # Winning event group: first group (brain order) with a word hit,
+        # preferring non-generic groups.
+        win_group = None
+        win_words: list[str] = []
+        for gname, g in events.items():
+            words = [w for w in g.get("words", []) if _has(low, str(w))]
+            if words:
+                if not g.get("generic"):
+                    win_group, win_words = gname, words
+                    break
+                if win_group is None:
+                    win_group, win_words = gname, words
+        if win_group is None:
+            continue
+        group = events[win_group]
+        if win_group == "award_show":
+            label = f"{win_words[0]} award"
+        elif win_group == "business":
+            label = " ".join(win_words[:2])
+        else:
+            label = win_words[0]
+        person = next((n for n in sent_names if n != main), sent_names[0] if sent_names else main)
+        year = years[0] if years else ""
+        topic = f"{person}: {label} {year}".strip() if person else f"{label} {year}".strip()
+        extra = " ".join(group.get("query_words", [])[:2])
+        queries = []
+        for tmpl in cfg.get("query_templates", ["{main} {names} {event} {year}"]):
+            q = tmpl.format(main=main, names=person, event=label, year=year, extra=extra)
+            q = " ".join(q.split())
+            words = q.split()[: int(cfg.get("max_query_words", 9))]
+            q = " ".join(words)
+            if q and q not in queries:
+                queries.append(q)
+        queries = queries[: int(cfg.get("queries_per_moment", 2))]
+        topics.append(
+            {
+                "id": len(topics) + 1,
+                "script_line": sent,
+                "topic": topic,
+                "what_to_show": group.get("show", ""),
+                "search_queries": queries,
+                "keywords": sorted(set(win_words + [w.lower() for w in sent_names] + years)),
+            }
+        )
+    return {"main_subject": main, "topics": topics}
 
 
 def pick_clips(topic: dict, video: dict, lines: list[dict], brain: dict, max_clips: int = 3) -> list[dict]:
-    cb = brain["clips"]
-    prefs = brain.get("preferences", {}) or {}
-    channel = (video.get("channel") or "").lower()
-    if any(b and b.lower() in channel for b in prefs.get("blocked_channels", []) or []):
+    """Score sliding transcript windows; return up to max_clips clips."""
+    from engine.utils import fmt_time, score_clip
+
+    cfg = brain["clips"]
+    window = float(cfg.get("window_seconds", 30))
+    step = float(cfg.get("step_seconds", 10))
+    min_len = float(cfg.get("min_length", 8))
+    max_len = float(cfg.get("max_length", 40))
+    pre_roll = float(cfg.get("pre_roll", 2))
+    min_gap = float(cfg.get("min_gap_between_clips", 20))
+    min_rel = float(cfg.get("min_relevance", 3))
+    require = bool(cfg.get("require_name_or_year", True))
+    pts = cfg.get("relevance_points", {})
+    rel_per = float(cfg.get("relevance_per_point", 1.2))
+    int_per = float(cfg.get("interest_per_point", 1.0))
+    categories = cfg.get("categories", {})
+    penalties = cfg.get("penalties", {})
+    pen_phrases = penalties.get("phrases", [])
+    duration = float(video.get("duration") or 0)
+
+    if not lines:
         return []
-
-    segs = _segments(lines)
-    if not segs:
-        return []
-    video_end = segs[-1]["end"]
-
-    rp = cb.get("relevance_points", {})
-    names = topic.get("_names") or []
-    main = topic.get("_main") or ""
-    year = topic.get("_year") or ""
-    event_words = topic.get("_events") or []
-    other = [k for k in topic.get("keywords", []) if k not in names and k != main and k != year
-             and k not in event_words]
-    kw_weights = ([(n, rp.get("name", 3)) for n in names]
-                  + ([(main, rp.get("main_subject", 2))] if main else [])
-                  + ([(year, rp.get("year", 2))] if year else [])
-                  + [(e, rp.get("event_word", 2)) for e in event_words]
-                  + [(o, rp.get("other_keyword", 1)) for o in other])
-    # also match surnames alone ("West" for "Kanye West")
-    for n in names + ([main] if main else []):
-        parts = n.split()
-        if len(parts) > 1 and len(parts[-1]) > 3:
-            kw_weights.append((parts[-1], rp.get("name", 3) * 0.5))
-
-    title_low = (video.get("title") or "").lower()
-    title_bonus = rp.get("title_match", 1) * sum(1 for k, _ in kw_weights if has_phrase(title_low, k))
-    src_bonus, src_penalty, src_notes = video_source_score(video, brain)
-
-    cats = cb["categories"]
-    pen = cb.get("penalties", {})
-    boost = prefs.get("boost_phrases", []) or []
-    win, step = float(cb.get("window_seconds", 30)), float(cb.get("step_seconds", 10))
+    lines = sorted(lines, key=lambda ln: float(ln.get("start", 0)))
+    topic_names = [k for k in topic.get("keywords", [])]
+    topic_text = (topic.get("topic", "") + " " + topic.get("script_line", "")).lower()
+    title = str(video.get("title", "")).lower()
+    channel = str(video.get("channel", "")).lower()
+    trusted = brain.get("sources", {}).get("trusted_channels", {})
+    trusted_names = [str(n).lower() for n in trusted.get("names", [])]
+    trusted_bonus = float(trusted.get("bonus", 0))
+    good_words = [str(w).lower() for w in brain.get("sources", {}).get("good_title_words", {}).get("words", [])]
+    good_bonus = float(brain.get("sources", {}).get("good_title_words", {}).get("bonus", 0))
+    bad_words = [str(w).lower() for w in brain.get("sources", {}).get("bad_title_words", {}).get("words", [])]
+    bad_pen = float(brain.get("sources", {}).get("bad_title_words", {}).get("penalty", 0))
 
     candidates = []
-    t = segs[0]["start"]
-    while t < video_end:
-        in_win = [s for s in segs if s["start"] >= t and s["start"] < t + win]
-        if in_win:
-            text = " ".join(s["text"] for s in in_win)
+    t = float(lines[0].get("start", 0))
+    end_t = float(lines[-1].get("start", 0))
+    while t <= end_t:
+        win_lines = [ln for ln in lines if t <= float(ln.get("start", 0)) < t + window]
+        if win_lines:
+            text = " ".join(str(ln.get("text", "")) for ln in win_lines)
             low = text.lower()
-            # relevance
-            matched = [(k, w) for k, w in kw_weights if has_phrase(low, k)]
-            rel_raw = sum(w for _, w in {k: w for k, w in matched}.items()) + min(title_bonus, 3) - src_penalty
-            # interest by category
-            cat_scores, trig = {}, {}
-            for cat, spec in cats.items():
-                score, hits = 0.0, []
-                for ph in spec.get("phrases", []):
-                    c = count_phrase(low, ph)
-                    if c:
-                        score += float(spec.get("weight", 1)) * min(c, 2)
-                        hits.append(str(ph))
-                if score:
-                    cat_scores[cat], trig[cat] = score, hits
-            boost_raw = sum(2 for b in boost if has_phrase(low, b))
-            pen_raw = sum(float(p.get("points", 0)) for p in pen.get("phrases", []) if has_phrase(low, p.get("phrase", "")))
-            if t < float(pen.get("intro_seconds", 15)):
-                pen_raw += float(pen.get("intro_penalty", 0))
-            if t > video_end - float(pen.get("outro_seconds", 30)):
-                pen_raw += float(pen.get("outro_penalty", 0))
-            interest_raw = sum(cat_scores.values()) + boost_raw + src_bonus - pen_raw
-            relevance = max(1.0, min(10.0, 1 + rel_raw * float(cb.get("relevance_per_point", 1.2)) - pen_raw * 0.5))
-            interest = max(1.0, min(10.0, 1 + interest_raw * float(cb.get("interest_per_point", 1.0))))
-            strong = {n.lower() for n in names + ([main] if main else []) + ([year] if year else [])}
-            strong |= {n.split()[-1].lower() for n in names + ([main] if main else []) if len(n.split()) > 1}
-            has_strong = any(k.lower() in strong for k, _ in matched)
-            if relevance >= float(cb.get("min_relevance", 3)) and (has_strong or not cb.get("require_name_or_year", True)):
-                category = max(cat_scores, key=cat_scores.get) if cat_scores else (
-                    "Interview" if "interview" in title_low else "Background")
-                candidates.append({
-                    "t": t, "segs": in_win, "low": low, "relevance": round(relevance, 1),
-                    "interest": round(interest, 1), "category": category,
-                    "matched": [k for k, _ in matched], "triggers": trig.get(category, []),
-                })
+            start_s = max(0.0, float(win_lines[0].get("start", 0)) - pre_roll)
+            end_s = min(start_s + max_len, float(win_lines[-1].get("start", 0)) + 10)
+            if end_s - start_s >= min_len:
+                # Relevance
+                points = 0.0
+                found_name = False
+                for kw in topic_names:
+                    if _has(low, kw):
+                        found_name = True
+                        if kw in topic_text:
+                            points += float(pts.get("name", 3))
+                        else:
+                            points += float(pts.get("other_keyword", 1))
+                main = topic.get("main_subject", "") if isinstance(topic.get("main_subject"), str) else ""
+                # Main subject comes via topic keywords in practice; keep generic:
+                for w in topic.get("keywords", []):
+                    if re.search(r"\b(?:19|20)\d{2}\b", w) and _has(low, w):
+                        points += float(pts.get("year", 2))
+                for w in topic.get("keywords", []):
+                    if w not in topic_names:
+                        continue
+                if any(_has(title, kw) for kw in topic_names):
+                    points += float(pts.get("title_match", 1))
+                relevance = min(10.0, points * rel_per)
+                # Interest: best category
+                best_cat, best_score = "Background", 0.0
+                for cat, cdef in categories.items():
+                    s = float(cdef.get("weight", 1)) * sum(_count(low, ph) for ph in cdef.get("phrases", []))
+                    if s > best_score:
+                        best_cat, best_score = cat, s
+                interest = best_score * int_per
+                for pen in pen_phrases:
+                    if _has(low, str(pen.get("phrase", ""))):
+                        interest -= float(pen.get("points", 0))
+                if duration and start_s < float(penalties.get("intro_seconds", 15)):
+                    interest -= float(penalties.get("intro_penalty", 2))
+                if duration and end_s > duration - float(penalties.get("outro_seconds", 30)):
+                    interest -= float(penalties.get("outro_penalty", 2))
+                if any(n in channel for n in trusted_names):
+                    interest += trusted_bonus
+                if any(w in title for w in good_words):
+                    interest += good_bonus
+                if any(w in title for w in bad_words):
+                    interest -= bad_pen
+                interest = max(0.0, min(10.0, interest))
+                if relevance >= min_rel and (not require or found_name):
+                    score = score_clip(relevance, interest)
+                    candidates.append(
+                        {
+                            "start": start_s,
+                            "end": end_s,
+                            "start_str": fmt_time(start_s),
+                            "end_str": fmt_time(end_s),
+                            "category": best_cat,
+                            "what_happens": text[:220],
+                            "key_quote": win_lines[0].get("text", "") if win_lines else "",
+                            "why_it_fits": f"Matches {topic.get('topic', '')} ({best_cat}).",
+                            "relevance": round(relevance, 2),
+                            "interest": round(interest, 2),
+                            "score": score,
+                        }
+                    )
         t += step
 
-    # turn every candidate window into a clip range, then keep the best non-overlapping ones
-    candidates.sort(key=lambda c: c["relevance"] * 0.6 + c["interest"] * 0.4, reverse=True)
-    gap = float(cb.get("min_gap_between_clips", 20))
-    clips = []
-    for c in candidates:
-        segs_c = c["segs"]
-        first = next((s for s in segs_c if any(has_phrase(s["text"].lower(), k) for k in c["matched"] + c["triggers"])), segs_c[0])
-        start = max(0.0, first["start"] - float(cb.get("pre_roll", 2)))
-        end = min(max(s["end"] for s in segs_c), start + float(cb.get("max_length", 40)))
-        # keep going while the next lines still carry keywords or signals
-        hit_words = c["matched"] + c["triggers"]
-        for s_next in segs:
-            if s_next["start"] < end - 0.01:
-                continue
-            if s_next["start"] - end > 3 or s_next["end"] - start > float(cb.get("max_length", 40)):
-                break
-            if any(has_phrase(s_next["text"].lower(), k) for k in hit_words):
-                end = s_next["end"]
-            else:
-                break
-        if end - start < float(cb.get("min_length", 8)):
-            end = start + float(cb.get("min_length", 8))
-        if any(start < o["end"] + gap and end > o["start"] - gap for o in clips):
-            continue
-        def seg_hits(s, c=c):
-            low = s["text"].lower()
-            return sum(1 for p in c["triggers"] + c["matched"] if has_phrase(low, p))
-        best = max(segs_c, key=seg_hits)
-        quote = " ".join(best["text"].split()[:20])
-        kws = ", ".join(c["matched"][:4]) or "the topic"
-        trig = ", ".join(dict.fromkeys(c["triggers"][:3]))
-        why = f"Matches the script line ({kws})"
-        if trig:
-            why += f"; signals: {trig}"
-        if src_notes:
-            why += f"; {', '.join(src_notes)}"
-        clips.append({
-            "start": round(start, 1), "end": round(end, 1), "category": c["category"],
-            "what_happens": f"{c['category']} moment mentioning {kws}.", "key_quote": quote,
-            "why_it_fits": why + ".", "relevance": c["relevance"], "interest": c["interest"],
-        })
-        if len(clips) >= max_clips:
+    candidates.sort(key=lambda c: -c["score"])
+    picked = []
+    for cand in candidates:
+        if all(abs(cand["start"] - p["start"]) >= min_gap for p in picked):
+            picked.append(cand)
+        if len(picked) >= max_clips:
             break
-    clips.sort(key=lambda x: x["start"])
-    return clips
+    return picked

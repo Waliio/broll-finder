@@ -5,18 +5,19 @@ Never writes inside the install folder. On Windows this is
 on Linux ~/.local/share/BRollFinder. Results go to Documents/B-Roll Finder
 by default and can be changed in Settings.
 """
+
 from __future__ import annotations
 
 import json
 import os
-import shutil
+import sys
 from pathlib import Path
 
 APP_NAME = "BRollFinder"
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 DEFAULTS = {
-    "ai_provider": "offline",  # offline | gemini | claude -- offline is the default, no key needed
+    "ai_provider": "offline",
     "gemini_api_key": "",
     "claude_api_key": "",
     "gemini_model": "gemini-flash-latest",
@@ -45,14 +46,24 @@ DEFAULTS = {
 }
 
 
+def is_public_build() -> bool:
+    try:
+        from engine.build_mode import PUBLIC_BUILD
+
+        return bool(PUBLIC_BUILD)
+    except Exception:
+        return False
+
+
 def user_data_dir() -> Path:
     if os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
         return base / APP_NAME
-    if os.name == "posix" and "darwin" in os.uname().sysname.lower():
+    if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / APP_NAME
     try:
         from platformdirs import user_data_dir as _pdd
+
         return Path(_pdd(APP_NAME))
     except Exception:
         return Path.home() / ".local" / "share" / APP_NAME
@@ -63,34 +74,21 @@ def documents_dir() -> Path:
 
 
 def resource_path(name: str) -> Path:
-    """Bundled file: in the frozen app (sys._MEIPASS) first, else next to
-    this package (source mode)."""
-    import sys
+    """Bundled file. In the frozen app, sys._MEIPASS comes first."""
     here = Path(__file__).resolve()
     candidates = []
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         candidates.append(Path(sys._MEIPASS) / "resources" / name)
-    candidates += [here.parent.parent / "resources" / name,
-                   Path.cwd() / "resources" / name]
+    candidates += [here.parent.parent / "resources" / name, Path.cwd() / "resources" / name]
     for cand in candidates:
         if cand.exists():
             return cand
     return candidates[0]
 
 
-def is_public_build() -> bool:
-    """True only in a public build (BRAIN tab hidden, brain locked)."""
-    try:
-        from engine.build_mode import PUBLIC_BUILD
-        return bool(PUBLIC_BUILD)
-    except Exception:
-        return False
-
-
 def bundled_brain_text(name: str) -> str | None:
-    """Brain file content, from the bundled resources/ file if present,
-    else from the copy embedded in engine/default_brain.py. Returns None
-    only if both are unavailable."""
+    """Brain text from the bundled file if present and non-empty, else
+    from the embedded copy. Returns None only if both are unavailable."""
     src = resource_path(name)
     if src.exists():
         try:
@@ -101,6 +99,7 @@ def bundled_brain_text(name: str) -> str | None:
             pass
     try:
         from engine.default_brain import DEFAULT_BRAIN_TXT, DEFAULT_BRAIN_YAML
+
         if name == "brain_rules.yaml":
             return DEFAULT_BRAIN_YAML
         if name == "brain.txt":
@@ -111,18 +110,15 @@ def bundled_brain_text(name: str) -> str | None:
 
 
 def ensure_user_files(data_dir: Path | None = None) -> Path:
-    """Copy bundled brains to the user folder on first run. Returns data dir.
+    """Create the user folder and brain files on first run.
 
-    Also repairs a brain file that exists but is empty (the state users
-    reported: an empty BRAIN tab, which then blocks every scan at the
-    planning step). A missing/empty file is rewritten from the bundled
-    or embedded default; a non-empty user file is never touched."""
+    Public builds: never write a readable brain file to the PC.
+    Private builds: a missing OR empty brain file is rewritten from
+    the bundled/embedded default; a non-empty user file is never touched.
+    """
     data_dir = Path(data_dir) if data_dir else user_data_dir()
     (data_dir / "cache").mkdir(parents=True, exist_ok=True)
     if is_public_build():
-        # Public build: never write a readable brain file to the user's
-        # PC, or it could be opened from the user folder. Scans use the
-        # embedded brain instead (see offline_brain.load_brain_for_run).
         return data_dir
     for name in ("brain_rules.yaml", "brain.txt"):
         dest = data_dir / name

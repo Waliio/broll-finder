@@ -1,2 +1,3 @@
-"""B-Roll Finder engine package."""
-__version__ = "1.0.0"
+"""B-Roll Finder v2 engine."""
+
+__version__ = "2.0.0"

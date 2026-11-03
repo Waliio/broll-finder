@@ -1,41 +1,36 @@
-"""Small shared helpers: times, scoring, safe filenames."""
+"""Small pure helpers: time formatting/parsing and clip scoring."""
+
 from __future__ import annotations
 
-import re
+
+def fmt_time(seconds: float) -> str:
+    """Seconds -> 'm:ss' (e.g. 75 -> '1:15')."""
+    total = max(0, int(round(float(seconds))))
+    return f"{total // 60}:{total % 60:02d}"
 
 
-def fmt_time(seconds) -> str:
-    seconds = int(max(0, float(seconds or 0)))
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-def parse_time(value) -> float:
-    """Accept 75, '75', '1:15', '01:01:15' -> seconds (float)."""
-    if value is None:
+def parse_time(text: str) -> float:
+    """'m:ss' or 'h:mm:ss' -> seconds. Plain numbers pass through."""
+    text = str(text).strip()
+    if not text:
         return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    parts = str(value).strip().split(":")
+    parts = text.split(":")
     try:
-        nums = [float(p) for p in parts]
+        if len(parts) == 1:
+            return float(parts[0])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
     except ValueError:
         return 0.0
-    total = 0.0
-    for p in nums:
-        total = total * 60 + p
-    return total
-
-
-def score_clip(relevance, interest) -> float:
-    """The locked formula from the brief: relevance*0.6 + interest*0.4."""
-    return round(float(relevance) * 0.6 + float(interest) * 0.4, 1)
+    return 0.0
 
 
 def clip_url(video_id: str, start_s: float) -> str:
     return f"https://www.youtube.com/watch?v={video_id}&t={int(start_s)}s"
 
 
-def safe_name(text: str, limit: int = 50) -> str:
-    return re.sub(r"[^\w\- ]", "", text or "")[:limit].strip() or "clip"
+def score_clip(relevance: float, interest: float) -> float:
+    """Locked formula: relevance x 0.6 + interest x 0.4, capped at 10."""
+    return round(min(10.0, float(relevance) * 0.6 + float(interest) * 0.4), 2)

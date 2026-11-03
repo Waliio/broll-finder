@@ -1,26 +1,22 @@
-"""The scan pipeline: script -> moments -> YouTube -> transcripts -> clips.
+"""Scan pipeline: plan -> search -> transcripts -> score -> export.
 
-Default brain is Offline Brain (no key). Gemini / Claude are optional and
-use the same plan/clip shapes, via engine.ai. Every transcript request
-goes through TranscriptFetcher (cache -> API -> yt-dlp subtitles ->
-local Whisper, with a circuit breaker). Safe mode, partial save and
-Resume are built in: stopping mid-run saves what was found so far, and
-Resume continues from the next unfinished moment using the cache.
+Saves after EVERY moment (Excel + JSON + resume.json), so Stop/Resume
+never loses work.
 """
+
 from __future__ import annotations
 
 import json
-import time
-from datetime import datetime
 from pathlib import Path
 
-from .ai import AIProvider
-from .brain_text import brain_part, load_brain_text_for_run
-from .export import save_results
-from .offline_brain import load_brain_for_run, pick_clips, plan_moments
-from .transcript_fallback import TranscriptFetcher
-from .utils import clip_url, fmt_time, parse_time, score_clip
-from .youtube import RequestBudget, download_all_clips, youtube_search
+from engine.ai import AIProvider
+from engine.brain_text import brain_part, load_brain_text_for_run
+from engine.settings import ensure_user_files
+from engine.export import save_results
+from engine.offline_brain import load_brain_for_run, pick_clips, plan_moments
+from engine.transcript_fallback import TranscriptFetcher
+from engine.utils import clip_url, score_clip
+from engine.youtube import RequestBudget, download_all_clips, youtube_search
 
 
 class Pipeline:
@@ -28,7 +24,10 @@ class Pipeline:
                  emit=lambda event: None, search_func=None, transcript_fetcher=None,
                  image_func=None):
         self.settings = settings
-        self.data_dir = Path(data_dir)
+        # Guarantee the brain file exists (private) before any scan step.
+        # Public builds: ensure_user_files writes no brain file, and the
+        # for_run loaders use the embedded brain instead.
+        self.data_dir = ensure_user_files(Path(data_dir))
         self.cache_dir = self.data_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.log = log
@@ -38,7 +37,6 @@ class Pipeline:
         self.search_func = search_func
         self.image_func = image_func
         self._fetcher = transcript_fetcher
-        self.videos_per_moment_effective = int(settings.get("videos_per_moment", 4))
 
     def stop(self):
         self._stop = True
@@ -50,27 +48,18 @@ class Pipeline:
         self.log(msg)
         self.emit({"type": "log", "text": msg})
 
-    def _ytdlp_opts(self) -> dict:
-        opts = {}
-        if self.settings.get("proxy"):
-            opts["proxy"] = self.settings["proxy"]
-        browser = self.settings.get("cookies_from_browser", "")
-        if browser:
-            opts["cookiesfrombrowser"] = (browser.lower(),)
-        return opts
-
     def get_fetcher(self) -> TranscriptFetcher:
         if self._fetcher is not None:
             return self._fetcher
         self._fetcher = TranscriptFetcher(
-            self.cache_dir, ytdlp_opts=self._ytdlp_opts(),
+            self.cache_dir,
+            ytdlp_opts={"proxy": self.settings.get("proxy", "")},
             whisper_model=self.settings.get("whisper_fallback_model", "base"),
             whisper_max_minutes=int(self.settings.get("whisper_max_minutes", 20)),
             use_whisper_fallback=bool(self.settings.get("use_whisper_fallback", True)),
             log=self._log, should_stop=self.should_stop)
         return self._fetcher
 
-    # -- planning ---------------------------------------------------------
     def plan(self, script_text: str, max_topics: int | None = None):
         provider = self.settings.get("ai_provider", "offline")
         max_topics = int(max_topics or self.settings.get("max_moments", 15))
@@ -103,11 +92,13 @@ class Pipeline:
             if cur_start is None:
                 cur_start = ln["start"]
             cur.append(ln["text"])
+            if cur_start is None:
+                cur_start = ln["start"]
             if ln["start"] - cur_start >= 20:
-                blocks.append(f"[{fmt_time(cur_start)}] {' '.join(cur)}")
+                blocks.append(f"[{ln['start']}] {' '.join(cur)}")
                 cur, cur_start = [], None
         if cur:
-            blocks.append(f"[{fmt_time(cur_start)}] {' '.join(cur)}")
+            blocks.append(" ".join(cur))
         system = brain_part(sections, "WHO YOU ARE", "PART B", "EXAMPLES", "MY PREFERENCES")
         user = (f"SCRIPT LINE: {topic.get('script_line')}\nTOPIC: {topic.get('topic')}\n"
                 f"VIDEO: \"{video.get('title')}\" by {video.get('channel')}\nTRANSCRIPT:\n"
@@ -118,171 +109,131 @@ class Pipeline:
         result = ai.ask_json(system, user, max_tokens=3000) or {}
         out = []
         for c in result.get("clips", []):
-            s, e = parse_time(c.get("start")), parse_time(c.get("end"))
-            if e <= s:
-                e = s + 15
-            out.append({"start": round(s, 1), "end": round(e, 1),
-                        "category": c.get("category", "Background"),
-                        "what_happens": c.get("what_happens", ""),
-                        "key_quote": c.get("key_quote", ""),
-                        "why_it_fits": c.get("why_it_fits", ""),
-                        "relevance": float(c.get("relevance", 5)),
-                        "interest": float(c.get("interest", 5))})
+            from engine.utils import parse_time
+
+            s, e = parse_time(str(c.get("start", "0:00"))), parse_time(str(c.get("end", "0:00")))
+            out.append({
+                "start": s, "end": e, "category": c.get("category", ""),
+                "what_happens": c.get("what_happens", ""), "key_quote": c.get("key_quote", ""),
+                "why_it_fits": c.get("why_it_fits", ""), "relevance": c.get("relevance", 0),
+                "interest": c.get("interest", 0),
+                "score": score_clip(c.get("relevance", 0), c.get("interest", 0)),
+            })
         return out
 
-    # -- full run ---------------------------------------------------------
-    def run(self, script_text: str, run_name: str, resume_from: dict | None = None):
-        """Run a scan. Returns the run folder path. Saves partial results
-        on stop/error so nothing is lost."""
-        out_root = Path(self.settings.get("output_folder") or "broll_results")
-        stamp = datetime.now().strftime("%Y%m%d_%H%M")
-        out_dir = out_root / f"{run_name}_{stamp}" if not resume_from else Path(resume_from["out_dir"])
+    def run(self, script_text: str, run_name: str, resume_from: Path | None = None) -> Path:
+        out_root = Path(self.settings.get("output_folder") or (Path.home() / "Documents" / "B-Roll Finder"))
+        out_dir = out_root / run_name
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "script_transcript.txt").write_text(script_text, encoding="utf-8")
-
-        if resume_from:
-            plan = resume_from["plan"]
-            all_clips = list(resume_from.get("clips", []))
-            videos_seen = list(resume_from.get("videos_checked", []))
-            done_ids = set(resume_from.get("done_topic_ids", []))
-            images = list(resume_from.get("images", []))
-        else:
-            self._log("Planning moments from your script...")
-            self.emit({"type": "stage", "stage": "plan"})
-            plan = self.plan(script_text)
-            all_clips, videos_seen, images, done_ids = [], [], [], set()
-            self._log(f"Found {len(plan['topics'])} moments about: {plan.get('main_subject', '?')}")
-
+        done_ids: set[int] = set()
+        clips: list[dict] = []
+        videos_checked: list[dict] = []
+        images: list[dict] = []
+        if resume_from and Path(resume_from).exists():
+            try:
+                prev = json.loads(Path(resume_from).read_text(encoding="utf-8"))
+                done_ids = set(prev.get("done_topic_ids", []))
+                clips = prev.get("clips", [])
+                videos_checked = prev.get("videos_checked", [])
+                images = prev.get("images", [])
+            except Exception:
+                pass
+        self._log("Planning moments...")
+        plan = self.plan(script_text)
+        topics = plan.get("topics", [])
+        self.emit({"type": "plan", "main_subject": plan.get("main_subject", ""), "topics": topics})
+        min_score = float(self.settings.get("min_score", 6.0))
+        videos_per = int(self.settings.get("videos_per_moment", 4))
+        clips_per_video = int(self.settings.get("clips_per_video", 3))
+        max_minutes = float(self.settings.get("max_video_minutes", 90))
         fetcher = self.get_fetcher()
-        if getattr(fetcher, "blocked", False):
-            self.videos_per_moment_effective = min(self.videos_per_moment_effective, 2)
-
-        for topic in plan["topics"]:
+        for topic in topics:
             if self._stop:
                 break
-            if topic["id"] in done_ids:
+            tid = int(topic.get("id", 0))
+            if tid in done_ids:
                 continue
-            topic.setdefault("search_queries", [])
-            topic.setdefault("keywords", [])
-            self.emit({"type": "moment", "id": topic["id"], "status": "searching",
-                       "topic": topic.get("topic", "")})
-            self._log(f"\nMoment {topic['id']}: {topic.get('topic', '')}")
-            candidates = {}
-            search_blocked = False
-            for q in topic.get("search_queries", []):
+            self.emit({"type": "moment", "id": tid, "topic": topic.get("topic", ""), "status": "searching", "clips": 0})
+            queries = topic.get("search_queries", []) or [topic.get("topic", "")]
+            found_videos: list[dict] = []
+            for q in queries:
+                if self.search_func:
+                    found_videos += self.search_func(q, videos_per)
+                else:
+                    found_videos += youtube_search(
+                        q, videos_per, self.cache_dir, budget=self.budget,
+                        safe_mode=bool(self.settings.get("safe_mode", True)), log=self._log)
+                if len(found_videos) >= videos_per:
+                    break
+            seen, videos = set(), []
+            for v in found_videos:
+                if v.get("video_id") in seen:
+                    continue
+                seen.add(v.get("video_id"))
+                if max_minutes and float(v.get("duration") or 0) > max_minutes * 60:
+                    continue
+                videos.append(v)
+            videos = videos[:videos_per]
+            for v in videos:
+                videos_checked.append({"topic": topic.get("topic", ""), **v})
+            topic_clip_count = 0
+            for video in videos:
                 if self._stop:
                     break
                 try:
-                    if self.search_func:
-                        found = self.search_func(q, int(self.settings.get("results_per_search", 5)))
-                    else:
-                        found = youtube_search(
-                            q, int(self.settings.get("results_per_search", 5)), self.cache_dir,
-                            budget=self.budget, ytdlp_opts=self._ytdlp_opts(),
-                            safe_mode=bool(self.settings.get("safe_mode", True)))
-                    for v in found:
-                        candidates.setdefault(v["video_id"], v)
-                except RuntimeError as e:
-                    search_blocked = True
-                    self._log(str(e))
-                    self.emit({"type": "search_blocked", "text": str(e)})
-                    break
-            if search_blocked:
-                break
-
-            scored = []
-            for vid, v in candidates.items():
-                if self._stop:
-                    break
-                rec = {**v, "topic_id": topic["id"], "status": ""}
-                if v.get("duration") and v["duration"] > int(self.settings.get("max_video_minutes", 90)) * 60:
-                    rec["status"] = "skipped: too long"
-                    videos_seen.append(rec)
+                    lines = fetcher.get(str(video.get("video_id", "")), video.get("duration"))
+                except Exception as exc:
+                    self._log(f"Transcript failed for {video.get('title', '')}: {exc}")
                     continue
-                self.budget.use("transcript")
-                lines = fetcher.get(vid, v.get("duration"))
-                if fetcher.blocked and self.videos_per_moment_effective > 2:
-                    self.videos_per_moment_effective = 2
-                    self.emit({"type": "local_transcription",
-                               "text": "Local transcription mode (YouTube is blocking transcripts). Slower but working."})
-                if not lines:
-                    rec["status"] = "no transcript"
-                    videos_seen.append(rec)
-                    continue
-                blob = " ".join(l["text"] for l in lines).lower()
-                rec["_lines"] = lines
-                rec["_kw"] = sum(blob.count(k.lower()) for k in topic.get("keywords", []) if k)
-                scored.append(rec)
-
-            used_ids = {c["video_id"] for c in all_clips}
-            scored.sort(key=lambda r: (r["video_id"] in used_ids, -r["_kw"]))
-            to_read = scored[: self.videos_per_moment_effective]
-            for r in scored[self.videos_per_moment_effective:]:
-                r["status"] = "not read (lower keyword match)"
-                videos_seen.append(r)
-
-            self.emit({"type": "moment", "id": topic["id"], "status": "scoring"})
-            for rec in to_read:
-                if self._stop:
-                    break
-                self._log(f"  Reading: {rec['title'][:70]}")
-                try:
-                    found_clips = self.pick_for_video(
-                        topic, rec, rec["_lines"], int(self.settings.get("clips_per_video", 3)))
-                except Exception as e:  # noqa: BLE001
-                    self._log(f"  Clip picking failed: {e}")
-                    found_clips = []
-                kept = 0
-                for c in found_clips:
-                    s, e = float(c["start"]), float(c["end"])
-                    sc = score_clip(c.get("relevance", 5), c.get("interest", 5))
-                    if sc < float(self.settings.get("min_score", 6)):
+                picked = self.pick_for_video(topic, video, lines, clips_per_video)
+                for c in picked:
+                    if c["score"] < min_score:
                         continue
-                    kept += 1
-                    clip = {"topic_id": topic["id"], "script_line": topic.get("script_line", ""),
-                            "category": c.get("category", "Background"), "score": sc,
-                            "start_s": s, "end_s": e, "start_str": fmt_time(s), "end_str": fmt_time(e),
-                            "clip_url": clip_url(rec["video_id"], s),
-                            "video_url": rec["url"], "video_id": rec["video_id"],
-                            "video_title": rec["title"], "channel": rec["channel"],
-                            "what_happens": c.get("what_happens", ""),
-                            "key_quote": c.get("key_quote", ""),
-                            "why_it_fits": c.get("why_it_fits", ""), "file": ""}
-                    all_clips.append(clip)
+                    clip = {
+                        "topic_id": tid, "topic": topic.get("topic", ""),
+                        "script_line": topic.get("script_line", ""),
+                        "video_id": video.get("video_id", ""),
+                        "video_title": video.get("title", ""), "channel": video.get("channel", ""),
+                        "start": c["start"], "end": c["end"],
+                        "start_str": c.get("start_str") or "", "end_str": c.get("end_str") or "",
+                        "category": c["category"], "score": c["score"],
+                        "what_happens": c["what_happens"], "key_quote": c["key_quote"],
+                        "why_it_fits": c["why_it_fits"],
+                        "clip_url": clip_url(str(video.get("video_id", "")), c["start"]),
+                        "video_url": f"https://www.youtube.com/watch?v={video.get('video_id', '')}",
+                        "rejected": False,
+                    }
+                    if not clip["start_str"]:
+                        from engine.utils import fmt_time
+
+                        clip["start_str"], clip["end_str"] = fmt_time(c["start"]), fmt_time(c["end"])
+                    clips.append(clip)
+                    topic_clip_count += 1
                     self.emit({"type": "clip", "clip": clip})
-                rec["status"] = f"read: {kept} clip(s) kept"
-                videos_seen.append(rec)
-            done_ids.add(topic["id"])
-            self.emit({"type": "moment", "id": topic["id"], "status": "done",
-                       "clips": sum(1 for c in all_clips if c["topic_id"] == topic["id"])})
-
-            if self.settings.get("also_find_images") and self.image_func:
+            if self.settings.get("also_find_images"):
                 try:
-                    for im in self.image_func(topic):
-                        images.append(im)
-                        self.emit({"type": "image", "image": im})
-                except Exception:
-                    pass
+                    if self.image_func:
+                        found_images = self.image_func(topic.get("topic", ""))
+                    else:
+                        from engine.images import find_images_for_moment
 
-            # Never lose work: save after every moment.
-            save_results(out_dir, plan, all_clips, videos_seen, images)
-            (out_dir / "resume.json").write_text(json.dumps(
-                {"plan": plan, "clips": all_clips, "videos_checked": videos_seen,
-                 "images": images, "done_topic_ids": sorted(done_ids),
-                 "out_dir": str(out_dir)}, indent=2), encoding="utf-8")
-
-        all_clips.sort(key=lambda c: (c["topic_id"], -c["score"]))
-        result = save_results(out_dir, plan, all_clips, videos_seen, images)
-        (out_dir / "resume.json").write_text(json.dumps(
-            {"plan": plan, "clips": all_clips, "videos_checked": videos_seen,
-             "images": images, "done_topic_ids": sorted(done_ids),
-             "out_dir": str(out_dir)}, indent=2), encoding="utf-8")
-        self._log(f"\nDONE! {len(all_clips)} clips. Excel file: {result['excel']}")
-        self.emit({"type": "done", "out_dir": str(out_dir), "clips": len(all_clips),
-                   "excel": result["excel"], "stopped": self._stop})
+                        found_images = find_images_for_moment(
+                            topic.get("topic", ""),
+                            commercial_only=bool(self.settings.get("commercial_images_only", True)))
+                    for im in found_images:
+                        images.append({"topic": topic.get("topic", ""), **im})
+                        self.emit({"type": "image", "image": images[-1]})
+                except Exception as exc:
+                    self._log(f"Images failed for {topic.get('topic', '')}: {exc}")
+            done_ids.add(tid)
+            self.emit({"type": "moment", "id": tid, "topic": topic.get("topic", ""), "status": "done", "clips": topic_clip_count})
+            save_results(out_dir, run_name, clips, topics, videos_checked, images)
+            (out_dir / "resume.json").write_text(json.dumps({
+                "run_name": run_name, "done_topic_ids": sorted(done_ids),
+                "clips": clips, "videos_checked": videos_checked, "images": images,
+                "topics": topics,
+            }, indent=2), encoding="utf-8")
+        save_results(out_dir, run_name, clips, topics, videos_checked, images)
+        self.emit({"type": "done", "out_dir": str(out_dir), "clips": len(clips)})
+        self._log(f"Done. {len(clips)} clips saved to {out_dir}")
         return out_dir
-
-    def download_all(self, out_dir: Path, clips: list[dict]) -> dict:
-        return download_all_clips(clips, Path(out_dir) / "clips", log=self._log,
-                                  should_stop=self.should_stop,
-                                  ytdlp_opts=self._ytdlp_opts())

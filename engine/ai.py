@@ -1,103 +1,99 @@
-"""Optional AI providers. Offline Brain is the default and needs no key.
+"""Optional Gemini / Claude access through one shared ask_json interface."""
 
-ask_json(system, user) -> dict, shared by Gemini and Claude so the
-pipeline never cares which provider is active. Robust JSON parsing,
-retries, 503 fallback to the lite Gemini model, 429 waits, daily-quota stop.
-"""
 from __future__ import annotations
 
 import json
 import re
 import time
-
-FENCE_RE = re.compile(r"^```(?:json)?|```$", flags=re.M)
-
-
-def parse_json_robust(text: str) -> dict:
-    text = FENCE_RE.sub("", (text or "").strip()).strip()
-    starts = [i for i in (text.find("{"), text.find("[")) if i != -1]
-    if starts:
-        text = text[min(starts):]
-    data = json.loads(text)
-    if isinstance(data, list):
-        return {"items": data}
-    return data
+import urllib.request
+import urllib.error
 
 
-class AIError(Exception):
-    pass
+def strip_json_fence(text: str) -> str:
+    text = text.strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return text
 
 
 class AIProvider:
     def __init__(self, settings: dict):
         self.settings = settings
-        self._client = None
-        self._last_call = 0.0
-        self.gemini_model = settings.get("gemini_model", "gemini-flash-latest")
+        self.quota_stopped = False
 
-    def ask_json(self, system: str, user: str, max_tokens: int = 4000) -> dict | None:
+    def _post(self, url: str, payload: dict, headers: dict) -> dict:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            if exc.code == 429:
+                wait = 60
+                m = re.search(r"retry.*?(\d+)", body, re.IGNORECASE)
+                if m:
+                    wait = int(m.group(1))
+                time.sleep(min(wait, 120))
+                raise RuntimeError("AI rate limit (429). Waited, please retry.") from exc
+            if "quota" in body.lower() or "exceed" in body.lower():
+                self.quota_stopped = True
+                raise RuntimeError("AI daily quota reached. Use Offline Brain.") from exc
+            raise RuntimeError(f"AI request failed ({exc.code}): {body[:300]}") from exc
+
+    def ask_json(self, system: str, user: str, max_tokens: int = 6000) -> dict | None:
         provider = self.settings.get("ai_provider", "offline")
-        if provider == "offline":
-            raise AIError("Offline Brain is active; AI is not used for this step.")
-        call = self._call_gemini if provider == "gemini" else self._call_claude
-        system = system + "\n\nRespond with valid JSON only. No markdown, no commentary."
-        fallback = self.settings.get("gemini_fallback_model", "gemini-flash-lite-latest")
-        for attempt in range(6):
-            try:
-                return parse_json_robust(call(system, user, max_tokens))
-            except (json.JSONDecodeError, ValueError):
-                continue
-            except Exception as e:  # noqa: BLE001
-                msg = str(e)
-                if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "rate" in msg.lower():
-                    if "per day" in msg.lower() or "PerDay" in msg:
-                        return None
-                    time.sleep(60 * (attempt + 1))
-                elif "503" in msg or "UNAVAILABLE" in msg or "overloaded" in msg.lower():
-                    if provider == "gemini" and attempt >= 1 and self.gemini_model != fallback:
-                        self.gemini_model = fallback
-                    else:
-                        time.sleep(20)
-                else:
-                    time.sleep(10)
+        if provider == "gemini":
+            return self._gemini(system, user, max_tokens)
+        if provider == "claude":
+            return self._claude(system, user, max_tokens)
         return None
 
-    def _call_gemini(self, system, user, max_tokens):
-        if self._client is None:
-            from google import genai
-            key = self.settings.get("gemini_api_key", "")
-            if not key:
-                raise AIError("No Gemini key saved. Add one in Settings, or use Offline Brain.")
-            self._client = genai.Client(api_key=key)
-        from google.genai import types
-        wait = 4.5 - (time.time() - self._last_call)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call = time.time()
-        resp = self._client.models.generate_content(
-            model=self.gemini_model, contents=user,
-            config=types.GenerateContentConfig(
-                system_instruction=system, response_mime_type="application/json",
-                max_output_tokens=max(max_tokens, 8000), temperature=0.4))
-        return resp.text
+    def _gemini(self, system: str, user: str, max_tokens: int) -> dict | None:
+        key = self.settings.get("gemini_api_key", "")
+        if not key:
+            raise RuntimeError("Gemini API key is missing. Add it in Settings or use Offline Brain.")
+        models = [self.settings.get("gemini_model", "gemini-flash-latest"),
+                  self.settings.get("gemini_fallback_model", "gemini-flash-lite-latest")]
+        last_exc = None
+        for model in dict.fromkeys(models):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            payload = {
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": [{"parts": [{"text": user}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens, "responseMimeType": "application/json"},
+            }
+            try:
+                data = self._post(url, payload, {"Content-Type": "application/json"})
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(strip_json_fence(text))
+            except Exception as exc:
+                last_exc = exc
+                if "503" in str(exc) or "overloaded" in str(exc).lower():
+                    continue  # lite-model fallback
+                raise
+        raise RuntimeError(f"Gemini failed: {last_exc}")
 
-    def _call_claude(self, system, user, max_tokens):
-        if self._client is None:
-            import anthropic
-            key = self.settings.get("claude_api_key", "")
-            if not key:
-                raise AIError("No Claude key saved. Add one in Settings, or use Offline Brain.")
-            self._client = anthropic.Anthropic(api_key=key)
-        resp = self._client.messages.create(
-            model=self.settings.get("claude_model", "claude-sonnet-4-5"),
-            max_tokens=max_tokens, system=system,
-            messages=[{"role": "user", "content": user}])
-        return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-
-    def test_key(self) -> bool:
-        """One tiny request. Returns True only if the provider answers."""
-        try:
-            out = self.ask_json("You are a test.", '{"ok": true}', max_tokens=200)
-            return bool(out)
-        except Exception:
-            return False
+    def _claude(self, system: str, user: str, max_tokens: int) -> dict | None:
+        key = self.settings.get("claude_api_key", "")
+        if not key:
+            raise RuntimeError("Claude API key is missing. Add it in Settings or use Offline Brain.")
+        url = "https://api.anthropic.com/v1/messages"
+        payload = {
+            "model": self.settings.get("claude_model", "claude-sonnet-4-5"),
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        data = self._post(url, payload, {
+            "Content-Type": "application/json",
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+        })
+        text = "".join(b.get("text", "") for b in data.get("content", []))
+        return json.loads(strip_json_fence(text))
