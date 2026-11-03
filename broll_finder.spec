@@ -12,17 +12,23 @@ from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
 datas = [
-    ('resources/brain.txt', 'resources'),
-    ('resources/brain_rules.yaml', 'resources'),
     ('resources/icon.png', 'resources'),
     ('frontend/dist', 'frontend/dist'),
 ]
+if os.environ.get('BROLL_PUBLIC_BUILD') != '1':
+    # Private build only: the plain brain files ship with the app.
+    # Public builds must NOT contain a readable brain file in the
+    # install folder; scans use the embedded brain in default_brain.py.
+    datas += [
+        ('resources/brain.txt', 'resources'),
+        ('resources/brain_rules.yaml', 'resources'),
+    ]
 binaries = []
 hiddenimports = ['engine', 'engine.pipeline', 'engine.offline_brain',
                  'engine.transcript_fallback', 'engine.youtube', 'engine.images',
                  'engine.export', 'engine.ai', 'engine.transcribe',
                  'engine.settings', 'engine.brain_text', 'engine.utils',
-                 'engine.default_brain']
+                 'engine.default_brain', 'engine.build_mode']
 # faster-whisper / CTranslate2 / PyAV need their data files collected.
 for pkg in ('ctranslate2', 'av', 'tokenizers', 'onnxruntime'):
     try:
