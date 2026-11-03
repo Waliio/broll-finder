@@ -10,6 +10,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('mission')
   const [script, setScript] = useState('')
   const [brain, setBrain] = useState('offline')
+  const [isPublic, setIsPublic] = useState(false)
   const [moments, setMoments] = useState(15)
   const [videosPer, setVideosPer] = useState(4)
   const [minScore, setMinScore] = useState(6)
@@ -42,13 +43,19 @@ export default function App() {
   }, [])
 
   const loadBrain = useCallback(async (mode: string) => {
+    if (isPublic) return
     const b = await call<{ text: string; ok?: boolean; error?: string }>('get_brain', mode)
     if (!b) { setBrainMsg('Could not load the brain. Close and reopen the app, then try Reload.'); return }
     if (b.ok === false) { setBrainMsg(`Could not load the brain: ${b.error || 'unknown error'}`); return }
     setBrainText(b.text)
+  }, [isPublic])
+
+  const loadBuildMode = useCallback(async () => {
+    const m = await call<{ public?: boolean }>('get_build_mode')
+    if (m) setIsPublic(Boolean(m.public))
   }, [])
 
-  useEffect(() => { loadSettings(); loadBrain('offline') }, [loadSettings, loadBrain])
+  useEffect(() => { loadSettings(); loadBuildMode(); loadBrain('offline') }, [loadSettings, loadBuildMode, loadBrain])
 
   // Poll Python for scan events (progress, moments, clips, logs).
   useEffect(() => {
@@ -128,7 +135,7 @@ export default function App() {
       </header>
 
       <nav className="flex gap-2 px-5 py-3 flex-wrap">
-        {(['mission', 'live', 'results', 'images', 'brain', 'settings', 'history'] as Tab[]).map((t) => (
+        {((isPublic ? ['mission', 'live', 'results', 'images', 'settings', 'history'] : ['mission', 'live', 'results', 'images', 'brain', 'settings', 'history']) as Tab[]).map((t) => (
           <button key={t} className={`chip ${tab === t ? 'active' : ''}`} onClick={() => { setTab(t); if (t === 'history') loadHistory() }}>{t.toUpperCase()}</button>
         ))}
       </nav>
@@ -280,7 +287,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === 'brain' && (
+        {tab === 'brain' && !isPublic && (
           <div className="grid md:grid-cols-5 gap-4">
             <div className="panel p-4 md:col-span-3">
               <h2 className="font-bold text-lg mb-2">Brain Lab — {brain === 'offline' ? 'Offline Brain (YAML rules)' : 'AI Brain (brain.txt)'}</h2>
