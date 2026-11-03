@@ -78,16 +78,50 @@ def resource_path(name: str) -> Path:
     return candidates[0]
 
 
+def bundled_brain_text(name: str) -> str | None:
+    """Brain file content, from the bundled resources/ file if present,
+    else from the copy embedded in engine/default_brain.py. Returns None
+    only if both are unavailable."""
+    src = resource_path(name)
+    if src.exists():
+        try:
+            text = src.read_text(encoding="utf-8")
+            if text.strip():
+                return text
+        except Exception:
+            pass
+    try:
+        from engine.default_brain import DEFAULT_BRAIN_TXT, DEFAULT_BRAIN_YAML
+        if name == "brain_rules.yaml":
+            return DEFAULT_BRAIN_YAML
+        if name == "brain.txt":
+            return DEFAULT_BRAIN_TXT
+    except Exception:
+        pass
+    return None
+
+
 def ensure_user_files(data_dir: Path | None = None) -> Path:
-    """Copy bundled brains to the user folder on first run. Returns data dir."""
+    """Copy bundled brains to the user folder on first run. Returns data dir.
+
+    Also repairs a brain file that exists but is empty (the state users
+    reported: an empty BRAIN tab, which then blocks every scan at the
+    planning step). A missing/empty file is rewritten from the bundled
+    or embedded default; a non-empty user file is never touched."""
     data_dir = Path(data_dir) if data_dir else user_data_dir()
     (data_dir / "cache").mkdir(parents=True, exist_ok=True)
     for name in ("brain_rules.yaml", "brain.txt"):
         dest = data_dir / name
-        if not dest.exists():
-            src = resource_path(name)
-            if src.exists():
-                shutil.copyfile(src, dest)
+        needs = True
+        if dest.exists():
+            try:
+                needs = not dest.read_text(encoding="utf-8", errors="ignore").strip()
+            except Exception:
+                needs = True
+        if needs:
+            text = bundled_brain_text(name)
+            if text is not None:
+                dest.write_text(text, encoding="utf-8")
     return data_dir
 
 
