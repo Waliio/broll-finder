@@ -21,7 +21,8 @@ binaries = []
 hiddenimports = ['engine', 'engine.pipeline', 'engine.offline_brain',
                  'engine.transcript_fallback', 'engine.youtube', 'engine.images',
                  'engine.export', 'engine.ai', 'engine.transcribe',
-                 'engine.settings', 'engine.brain_text', 'engine.utils']
+                 'engine.settings', 'engine.brain_text', 'engine.utils',
+                 'engine.default_brain']
 # faster-whisper / CTranslate2 / PyAV need their data files collected.
 for pkg in ('ctranslate2', 'av', 'tokenizers', 'onnxruntime'):
     try:
