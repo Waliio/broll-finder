@@ -166,6 +166,21 @@ class TestPipelineWithFakes(unittest.TestCase):
         finally:
             settings_mod.resource_path = orig
 
+    def test_public_build_uses_embedded_brain_without_a_file(self):
+        # Public builds must scan without any readable brain file on disk.
+        import engine.build_mode as build_mode
+        from engine.offline_brain import load_brain_for_run
+        orig = build_mode.PUBLIC_BUILD
+        build_mode.PUBLIC_BUILD = True
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                ensure_user_files(Path(tmp))
+                self.assertFalse((Path(tmp) / "brain_rules.yaml").exists())
+                brain = load_brain_for_run(Path(tmp))
+                self.assertTrue(brain["clips"]["categories"])
+        finally:
+            build_mode.PUBLIC_BUILD = orig
+
     def test_settings_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = load_settings(Path(tmp))
