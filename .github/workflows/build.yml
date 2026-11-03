@@ -9,6 +9,12 @@ name: Build Windows installer
 
 on:
   workflow_dispatch:  # you press "Run workflow" by hand
+    inputs:
+      build_type:
+        description: "Private = BRAIN tab visible (for you). Public = BRAIN tab hidden and brain locked (for others)."
+        type: choice
+        options: [private, public]
+        default: private
   push:
     tags: ["v*"]     # or push a tag like v1.0.0 for a release
 
@@ -39,6 +45,21 @@ jobs:
       - name: Run tests
         run: python -m pytest tests -q
 
+      # Private (default) keeps engine/build_mode.py as PUBLIC_BUILD=False.
+      # Public overwrites it in the runner ONLY (never committed) so the
+      # built app hides the BRAIN tab and locks the brain APIs, while
+      # scans still use the embedded brain.
+      - name: Set build variant
+        shell: pwsh
+        run: |
+          if ("${{ inputs.build_type }}" -eq "public") {
+            "PUBLIC_BUILD = True" | Out-File -Encoding utf8 engine\build_mode.py
+            $env:BROLL_PUBLIC_BUILD = "1"
+          } else {
+            "PUBLIC_BUILD = False" | Out-File -Encoding utf8 engine\build_mode.py
+          }
+          Get-Content engine\build_mode.py
+
       - name: Build frontend
         run: |
           cd frontend
@@ -46,6 +67,8 @@ jobs:
           npm run build
 
       - name: Build app with PyInstaller
+        env:
+          BROLL_PUBLIC_BUILD: ${{ inputs.build_type == 'public' && '1' || '0' }}
         run: pyinstaller broll_finder.spec
 
       - name: Download ffmpeg, yt-dlp and WebView2 bootstrapper
@@ -87,6 +110,6 @@ jobs:
       - name: Upload setup file
         uses: actions/upload-artifact@v4
         with:
-          name: BRollFinder-Setup
+          name: ${{ inputs.build_type == 'public' && 'BRollFinder-Setup-Public' || 'BRollFinder-Setup' }}
           path: installer-output/BRollFinder-Setup-*.exe
           if-no-files-found: error
