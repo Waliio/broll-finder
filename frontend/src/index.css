@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* B-Roll Finder v2 theme: deep dark blue + bright orange, high-class techy. */
+:root {
+  --ink: #071426;
+  --panel: #0b2240;
+  --panel2: #102a52;
+  --line: #1e3a66;
+  --accent: #ff6a00;
+  --accent2: #ff8c1a;
+  --body: #c7d6ea;
+}
+body { background: var(--ink); color: var(--body); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+h1, h2, h3 { color: #fff; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.panel {
+  background: linear-gradient(180deg, rgba(16, 42, 82, 0.92), rgba(11, 34, 64, 0.96));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+}
+.btn {
+  background: var(--accent); color: #fff; font-weight: 700;
+  padding: 0.55rem 1rem; border-radius: 10px; transition: all 0.15s ease;
+}
+.btn:hover { background: var(--accent2); box-shadow: 0 0 18px rgba(255, 106, 0, 0.55); }
+.btn-ghost {
+  border: 1px solid var(--line); color: var(--body);
+  padding: 0.5rem 0.9rem; border-radius: 10px;
+}
+.btn-ghost:hover { border-color: var(--accent); color: #fff; }
+.chip {
+  border: 1px solid var(--line); color: var(--body);
+  padding: 0.35rem 0.8rem; border-radius: 999px; font-size: 0.8rem;
+}
+.chip.active { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 0 14px rgba(255, 106, 0, 0.45); }
+.textarea, .input {
+  width: 100%; background: #071426; border: 1px solid var(--line);
+  border-radius: 12px; padding: 0.7rem; color: #eaf1fb;
+}
+.textarea:focus, .input:focus { outline: none; border-color: var(--accent); }
+.grid-texture {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.14) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
