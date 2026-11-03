@@ -1,9 +1,7 @@
-# PyInstaller spec: onedir mode (faster startup, fewer antivirus false
-# positives than onefile), no UPX, console hidden. Run on Windows only:
+# PyInstaller spec: onedir, no console, no UPX. Windows only:
 #   pyinstaller broll_finder.spec
 # The GitHub Actions workflow runs this on windows-latest.
-# NOTE: This file cannot produce a Windows .exe when run on Linux/macOS.
-# PyInstaller builds for the machine it runs on.
+# NOTE: This cannot produce a Windows .exe on Linux/macOS.
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
@@ -16,7 +14,7 @@ datas = [
     ('frontend/dist', 'frontend/dist'),
 ]
 if os.environ.get('BROLL_PUBLIC_BUILD') != '1':
-    # Private build only: the plain brain files ship with the app.
+    # Private build only: plain brain files ship normally.
     # Public builds must NOT contain a readable brain file in the
     # install folder; scans use the embedded brain in default_brain.py.
     datas += [
@@ -29,7 +27,6 @@ hiddenimports = ['engine', 'engine.pipeline', 'engine.offline_brain',
                  'engine.export', 'engine.ai', 'engine.transcribe',
                  'engine.settings', 'engine.brain_text', 'engine.utils',
                  'engine.default_brain', 'engine.build_mode']
-# faster-whisper / CTranslate2 / PyAV need their data files collected.
 for pkg in ('ctranslate2', 'av', 'tokenizers', 'onnxruntime'):
     try:
         tmp_ret = collect_all(pkg)
@@ -39,11 +36,10 @@ for pkg in ('ctranslate2', 'av', 'tokenizers', 'onnxruntime'):
     except Exception:
         pass
 
-# CRITICAL: the entry script is app/main.py, but the engine package lives
-# at the project root. With pathex=[] PyInstaller only searches app/ and
-# silently leaves engine out of the bundle, so the installed app crashes
-# with "No module named 'engine'". The workflow runs this from the repo
-# root, so '.' is the project root here.
+# CRITICAL (v1 lesson): the entry script is app/main.py, but the engine
+# package lives at the project root. pathex MUST point at the project
+# root, or PyInstaller silently leaves engine out and the installed app
+# crashes with "No module named 'engine'".
 a = Analysis(
     ['app/main.py'],
     pathex=[os.path.abspath('.')],
@@ -68,7 +64,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,  # no console window, ever
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
