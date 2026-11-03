@@ -28,6 +28,23 @@ def load_brain(path: str | Path) -> dict:
     return data
 
 
+def load_brain_for_run(data_dir: str | Path) -> dict:
+    """Brain for a scan. Public builds use the embedded brain only, so
+    no readable brain file ever has to exist on the user's PC. Private
+    builds use the user's (editable) brain file, as before."""
+    try:
+        from engine.settings import is_public_build
+        public = is_public_build()
+    except Exception:
+        public = False
+    if public:
+        from engine.default_brain import DEFAULT_BRAIN_YAML
+        data = yaml.safe_load(DEFAULT_BRAIN_YAML)
+        validate_brain(data)
+        return data
+    return load_brain(Path(data_dir) / "brain_rules.yaml")
+
+
 def validate_brain(b: dict) -> None:
     """Raise ValueError with a plain message if the brain file is broken."""
     if not isinstance(b, dict):
