@@ -15,9 +15,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .ai import AIProvider
-from .brain_text import brain_part, load_brain_text
+from .brain_text import brain_part, load_brain_text_for_run
 from .export import save_results
-from .offline_brain import load_brain, pick_clips, plan_moments
+from .offline_brain import load_brain_for_run, pick_clips, plan_moments
 from .transcript_fallback import TranscriptFetcher
 from .utils import clip_url, fmt_time, parse_time, score_clip
 from .youtube import RequestBudget, download_all_clips, youtube_search
@@ -75,9 +75,9 @@ class Pipeline:
         provider = self.settings.get("ai_provider", "offline")
         max_topics = int(max_topics or self.settings.get("max_moments", 15))
         if provider == "offline":
-            brain = load_brain(self.data_dir / "brain_rules.yaml")
+            brain = load_brain_for_run(self.data_dir)
             return plan_moments(script_text, brain, max_topics)
-        sections = load_brain_text(self.data_dir / "brain.txt")
+        sections = load_brain_text_for_run(self.data_dir)
         ai = AIProvider(self.settings)
         system = brain_part(sections, "WHO YOU ARE", "PART A", "MY PREFERENCES")
         user = (f"SCRIPT:\n\"\"\"{script_text[:30000]}\"\"\"\n\nReturn JSON in this exact shape:\n"
@@ -93,9 +93,9 @@ class Pipeline:
     def pick_for_video(self, topic, video, lines, max_clips=3):
         provider = self.settings.get("ai_provider", "offline")
         if provider == "offline":
-            brain = load_brain(self.data_dir / "brain_rules.yaml")
+            brain = load_brain_for_run(self.data_dir)
             return pick_clips(topic, video, lines, brain, max_clips)
-        sections = load_brain_text(self.data_dir / "brain.txt")
+        sections = load_brain_text_for_run(self.data_dir)
         ai = AIProvider(self.settings)
         blocks = []
         cur, cur_start = [], None
