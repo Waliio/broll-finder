@@ -27,8 +27,8 @@ from engine.brain_text import validate_brain_text  # noqa: E402
 from engine.images import download_image, find_images_for_moment  # noqa: E402
 from engine.offline_brain import load_brain, plan_moments, validate_brain  # noqa: E402
 from engine.pipeline import Pipeline  # noqa: E402
-from engine.settings import (ensure_user_files, load_settings, resource_path,  # noqa: E402
-                             save_settings)
+from engine.settings import (ensure_user_files, is_public_build, load_settings,  # noqa: E402
+                             resource_path, save_settings)
 from engine.transcribe import transcribe_file  # noqa: E402
 
 
@@ -100,7 +100,14 @@ class Api:
         save_settings(self.settings, self.data_dir)
         return {"ok": True}
 
+    def get_build_mode(self):
+        """Public builds hide the BRAIN tab; private builds show it."""
+        return {"public": is_public_build()}
+
     def get_brain(self, mode: str = "offline"):
+        if is_public_build():
+            return {"text": "", "mode": mode, "ok": False,
+                    "error": "Brain is locked in this version."}
         name = "brain_rules.yaml" if mode == "offline" else "brain.txt"
         path = self.data_dir / name
         try:
@@ -123,6 +130,8 @@ class Api:
             return {"text": "", "mode": mode, "ok": False, "error": str(e)}
 
     def save_brain(self, text: str, mode: str = "offline"):
+        if is_public_build():
+            return {"ok": False, "error": "Brain is locked in this version."}
         name = "brain_rules.yaml" if mode == "offline" else "brain.txt"
         path = self.data_dir / name
         try:
@@ -140,6 +149,9 @@ class Api:
         return {"ok": True}
 
     def restore_brain(self, mode: str = "offline"):
+        if is_public_build():
+            return {"text": "", "ok": False,
+                    "error": "Brain is locked in this version."}
         name = "brain_rules.yaml" if mode == "offline" else "brain.txt"
         dest = self.data_dir / name
         try:
@@ -154,6 +166,8 @@ class Api:
             return {"text": "", "ok": False, "error": str(e)}
 
     def test_brain(self, text: str, sample_text: str = ""):
+        if is_public_build():
+            return {"ok": False, "error": "Brain is locked in this version."}
         """Show which moments the Offline Brain finds in a sample script.
         `text` is the brain YAML; the sample script is separate, so testing
         the brain never mistakes the brain file itself for a script."""
