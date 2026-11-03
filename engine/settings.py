@@ -78,6 +78,15 @@ def resource_path(name: str) -> Path:
     return candidates[0]
 
 
+def is_public_build() -> bool:
+    """True only in a public build (BRAIN tab hidden, brain locked)."""
+    try:
+        from engine.build_mode import PUBLIC_BUILD
+        return bool(PUBLIC_BUILD)
+    except Exception:
+        return False
+
+
 def bundled_brain_text(name: str) -> str | None:
     """Brain file content, from the bundled resources/ file if present,
     else from the copy embedded in engine/default_brain.py. Returns None
@@ -110,6 +119,11 @@ def ensure_user_files(data_dir: Path | None = None) -> Path:
     or embedded default; a non-empty user file is never touched."""
     data_dir = Path(data_dir) if data_dir else user_data_dir()
     (data_dir / "cache").mkdir(parents=True, exist_ok=True)
+    if is_public_build():
+        # Public build: never write a readable brain file to the user's
+        # PC, or it could be opened from the user folder. Scans use the
+        # embedded brain instead (see offline_brain.load_brain_for_run).
+        return data_dir
     for name in ("brain_rules.yaml", "brain.txt"):
         dest = data_dir / name
         needs = True
