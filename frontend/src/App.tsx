@@ -42,8 +42,10 @@ export default function App() {
   }, [])
 
   const loadBrain = useCallback(async (mode: string) => {
-    const b = await call<{ text: string }>('get_brain', mode)
-    if (b) setBrainText(b.text)
+    const b = await call<{ text: string; ok?: boolean; error?: string }>('get_brain', mode)
+    if (!b) { setBrainMsg('Could not load the brain. Close and reopen the app, then try Reload.'); return }
+    if (b.ok === false) { setBrainMsg(`Could not load the brain: ${b.error || 'unknown error'}`); return }
+    setBrainText(b.text)
   }, [])
 
   useEffect(() => { loadSettings(); loadBrain('offline') }, [loadSettings, loadBrain])
@@ -286,7 +288,7 @@ export default function App() {
               <div className="flex gap-2 mt-3 flex-wrap">
                 <button className="btn" onClick={async () => { const r = await call<{ ok: boolean; error?: string }>('save_brain', brainText, brain); setBrainMsg(r?.ok ? 'Saved. The next scan uses this brain.' : `Could not save: ${r?.error || 'unknown error'}`) }}>Save</button>
                 <button className="btn-ghost" onClick={async () => loadBrain(brain)}>Reload</button>
-                <button className="btn-ghost" onClick={async () => { const r = await call<{ text: string }>('restore_brain', brain); if (r) { setBrainText(r.text); setBrainMsg('Default brain restored.') } }}>Restore default</button>
+                <button className="btn-ghost" onClick={async () => { const r = await call<{ text: string; ok?: boolean; error?: string }>('restore_brain', brain); if (!r) { setBrainMsg('Restore failed: no reply from the app.'); } else if (r.ok === false) { setBrainMsg(`Restore failed: ${r.error || 'unknown error'}`) } else { setBrainText(r.text); setBrainMsg('Default brain restored.') } }}>Restore default</button>
               </div>
               {brainMsg && <p className="text-sm mt-2">{brainMsg}</p>}
             </div>
