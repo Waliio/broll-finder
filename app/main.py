@@ -103,9 +103,24 @@ class Api:
     def get_brain(self, mode: str = "offline"):
         name = "brain_rules.yaml" if mode == "offline" else "brain.txt"
         path = self.data_dir / name
-        if not path.exists():
+        try:
             ensure_user_files(self.data_dir)
-        return {"text": path.read_text(encoding="utf-8", errors="ignore"), "mode": mode}
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if not text.strip():
+                # Empty user file survived ensure_user_files: rewrite it.
+                from engine.settings import bundled_brain_text
+                fallback = bundled_brain_text(name)
+                if fallback:
+                    path.write_text(fallback, encoding="utf-8")
+                    text = fallback
+            if not text.strip():
+                return {"text": "", "mode": mode, "ok": False,
+                        "error": "Brain file is empty and no default could be loaded."}
+            return {"text": text, "mode": mode, "ok": True}
+        except Exception as e:  # noqa: BLE001
+            # Never raise: a raised call fails silently in the UI and the
+            # BRAIN tab just stays empty with no explanation.
+            return {"text": "", "mode": mode, "ok": False, "error": str(e)}
 
     def save_brain(self, text: str, mode: str = "offline"):
         name = "brain_rules.yaml" if mode == "offline" else "brain.txt"
@@ -126,11 +141,17 @@ class Api:
 
     def restore_brain(self, mode: str = "offline"):
         name = "brain_rules.yaml" if mode == "offline" else "brain.txt"
-        src = resource_path(name)
         dest = self.data_dir / name
-        if src.exists():
-            dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-        return {"text": dest.read_text(encoding="utf-8"), "ok": True}
+        try:
+            from engine.settings import bundled_brain_text
+            text = bundled_brain_text(name)
+            if text:
+                dest.write_text(text, encoding="utf-8")
+                return {"text": text, "ok": True}
+            return {"text": "", "ok": False,
+                    "error": "Default brain file could not be found in the app."}
+        except Exception as e:  # noqa: BLE001
+            return {"text": "", "ok": False, "error": str(e)}
 
     def test_brain(self, text: str, sample_text: str = ""):
         """Show which moments the Offline Brain finds in a sample script.
