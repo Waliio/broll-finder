@@ -1,14 +1,12 @@
 # Builds the Windows setup file on GitHub's free Windows computer.
-# Why: PyInstaller and Inno Setup only build Windows apps ON Windows.
-# A Linux/Mac computer cannot make BRollFinder-Setup.exe, however good it is.
-# How to use it: push this project to GitHub, open Actions, run this
-# workflow, then download the .exe from the run (see README.md).
+# PyInstaller and Inno Setup only build Windows apps ON Windows.
+# A Linux/Mac computer cannot make BRollFinder-Setup.exe.
 # Cost: free for a public repo. For a private repo, GitHub's free plan
 # includes 2,000 Actions minutes a month; this build uses roughly 10-20.
 name: Build Windows installer
 
 on:
-  workflow_dispatch:  # you press "Run workflow" by hand
+  workflow_dispatch:
     inputs:
       build_type:
         description: "Private = BRAIN tab visible (for you). Public = BRAIN tab hidden and brain locked (for others)."
@@ -16,7 +14,7 @@ on:
         options: [private, public]
         default: private
   push:
-    tags: ["v*"]     # or push a tag like v1.0.0 for a release
+    tags: ["v*"]
 
 jobs:
   build-windows:
@@ -54,7 +52,6 @@ jobs:
         run: |
           if ("${{ inputs.build_type }}" -eq "public") {
             "PUBLIC_BUILD = True" | Out-File -Encoding utf8 engine\build_mode.py
-            $env:BROLL_PUBLIC_BUILD = "1"
           } else {
             "PUBLIC_BUILD = False" | Out-File -Encoding utf8 engine\build_mode.py
           }
@@ -93,7 +90,7 @@ jobs:
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
           $pfx = "$env:TEMP\cert.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env.WINDOWS_CERT_PFX))
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1 -ExpandProperty FullName
           Get-ChildItem -Recurse -Include *.exe,*.dll dist\BRollFinder | ForEach-Object {
             & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 $_.FullName
